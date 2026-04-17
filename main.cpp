@@ -1,96 +1,136 @@
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 
 #include <Python.h>
+#include <ranges>
+#include <span>
 
 #include "nds.hpp"
 
+constexpr std::wstring_view intro_message = LR"(
+====================================================================
+
+  NNNNNNNN        NNNNNNNNDDDDDDDDDDDDD           SSSSSSSSSSSSSSS
+  N:::::::N       N::::::ND::::::::::::DDD      SS:::::::::::::::S
+  N::::::::N      N::::::ND:::::::::::::::DD   S:::::SSSSSS::::::S
+  N:::::::::N     N::::::NDDD:::::DDDDD:::::D  S:::::S     SSSSSSS
+  N::::::::::N    N::::::N  D:::::D    D:::::D S:::::S
+  N:::::::::::N   N::::::N  D:::::D     D:::::DS:::::S
+  N:::::::N::::N  N::::::N  D:::::D     D:::::D S::::SSSS
+  N::::::N N::::N N::::::N  D:::::D     D:::::D  SS::::::SSSSS
+  N::::::N  N::::N:::::::N  D:::::D     D:::::D    SSS::::::::SS
+  N::::::N   N:::::::::::N  D:::::D     D:::::D       SSSSSS::::S
+  N::::::N    N::::::::::N  D:::::D     D:::::D            S:::::S
+  N::::::N     N:::::::::N  D:::::D    D:::::D             S:::::S
+  N::::::N      N::::::::NDDD:::::DDDDD:::::D  SSSSSSS     S:::::S
+  N::::::N       N:::::::ND:::::::::::::::DD   S::::::SSSSSS:::::S
+  N::::::N        N::::::ND::::::::::::DDD     S:::::::::::::::SS
+  NNNNNNNN         NNNNNNNDDDDDDDDDDDDD         SSSSSSSSSSSSSSS
+
+                      Nuclear Data Source
+                            v0.1.0
+====================================================================
+
+    Type 'help' to view available commands.
+)";
+
 constexpr std::string_view help_message = R"(
-=======================================
+  help - Displays this message.
 
- ░███    ░██   ░███████      ░██████
- ░████   ░██   ░██   ░██    ░██   ░██
- ░██░██  ░██   ░██    ░██  ░██
- ░██ ░██ ░██   ░██    ░██   ░████████
- ░██  ░██░██   ░██    ░██          ░██
- ░██   ░████   ░██   ░██    ░██   ░██
- ░██    ░███   ░███████      ░██████
-
-         Nuclear Data Source
-               v0.0.2
-=======================================
-
-  nds - Displays this message.
+  n <nuclide> - List information for an isotope.
+  decay <nuclide> - List decay information for an isotope (discrete energies).
 
   Nuclide Format: <Symbol>[Isotope] or <Atomic Number><Isotope> (MCNP format)
   Examples: Co60, Fe, 8016
 
-  nds n <nuclide> - List information for an isotope.
+  eval <expression> - Evaluate a Python expression within the NDS context.
 
-  nds e <expression> - Evaluate a Python expression in the NDS context.
-  nds eval <expression>
-
-  nds exec <file> - Execute a Python file in the NDS context.
+  exit - Leave the program.
 )";
+
+//   nds exec <file> - Execute a Python file in the NDS context.
 
 nds::data_manager dm;
 
-PyObject * Py_nds_nuclide_data(PyObject * self, PyObject * args) {
-    const char * nuclide_string;
+bool python_mode = false;
 
-    if (!PyArg_ParseTuple(args, "s", &nuclide_string)) {
-        return nullptr;
-    }
+PyObject * main_module;
+PyObject * globals;
+PyObject * locals;
 
-    auto const [e, i] = dm.parse_nuclide(nuclide_string);
+void execute_command(std::span<std::string_view const> a_args);
+std::vector<std::string> parse_arguments(std::string_view a_command);
 
-    auto const & periodic_entry = dm.get_periodic_entry(e);
+void initialize_python_environment();
+void deinitialize_python_environment();
+void run_python_command(std::string const & a_command);
 
-    PyObject * data = PyDict_New();
-
-    PyDict_SetItemString(data, "name", PyUnicode_FromStringAndSize(periodic_entry.name.data(), static_cast<Py_ssize_t>(periodic_entry.name.size())));
-
-    return data;
-}
+PyObject * Py_nds_nuclide_data(PyObject * self, PyObject * args);
 
 PyMethodDef Py_nds_methods[] = {
     {"N", Py_nds_nuclide_data, METH_VARARGS, "Get nuclide data." },
     {nullptr, nullptr, 0, nullptr}
 };
 
-PyModuleDef Py_nds_module = {
-    PyModuleDef_HEAD_INIT, "nds", nullptr, -1, Py_nds_methods
-};
-
-PyMODINIT_FUNC PyInit_nds() {
-    return PyModule_Create(&Py_nds_module);
-}
-
 int main(int const argc, char const * const * const argv) {
-    if (argc <= 1) {
-        std::cout << help_message << std::endl;
-        return 0;
-    }
+    std::vector<std::string_view> initial_args(argc);
+    std::ranges::generate(initial_args, [i = 0, argv]() mutable { return std::string_view(argv[i++]); });
 
-    // auto const endf = ZipFile::Open("./data/ENDF-B-VIII.0_decay.zip");
-    // auto const co60 = endf->GetEntry("ENDF-B-VIII.0_decay/dec-027_Co_060.endf");
-    // auto const decompress_stream = co60->GetDecompressionStream();
-    //
-    // std::string line;
-    // std::getline(*decompress_stream, line);
-    //
-    // std::cout << line << '\n';
-    //
-    // co60->CloseDecompressionStream();
+    initialize_python_environment();
 
-    // Increase double output precision.
+    // Increase floating point output precision.
     std::cout << std::setprecision(10);
 
-    std::vector<std::string_view> args(argc);
-    std::ranges::generate(args, [i = 0, argv]() mutable { return std::string_view(argv[i++]); });
+    if (argc > 1) {
+        execute_command(std::span(initial_args).subspan(1));
+        return EXIT_SUCCESS;
+    }
 
-    if (args[1] == "n") {
-        auto [e, i] = dm.parse_nuclide(args[2]);
+    std::wcout << intro_message << std::endl;
+
+    std::string command;
+    do {
+        if (python_mode) {
+            std::cout << "PY ";
+        }
+
+        std::cout << ">>> " << std::flush;
+        std::getline(std::cin, command);
+
+        if (command == "py") {
+            python_mode = !python_mode;
+
+            if (python_mode) {
+                std::cout << "Python mode enabled. Type 'py' again to quit." << std::endl;
+            }
+            continue;
+        }
+
+        if (python_mode) {
+            run_python_command(command);
+            continue;
+        }
+
+        auto const args = parse_arguments(command);
+        auto const args_view = args
+            | std::views::transform([](auto const & a_arg) { return std::string_view(a_arg); })
+            | std::ranges::to<std::vector<std::string_view>>();
+        execute_command(args_view);
+    } while (command != "exit");
+
+    std::cout << "Thank you for using NDS!" << std::endl;
+
+    deinitialize_python_environment();
+
+    return EXIT_SUCCESS;
+}
+
+// ==================================== COMMAND HANDLING ====================================
+
+void execute_command(std::span<std::string_view const> const a_args) {
+    if (a_args[0] == "n") {
+        auto [e, i] = dm.parse_nuclide(a_args[1]);
 
         auto const & periodic_data = dm.get_periodic_entry(e);
 
@@ -144,42 +184,164 @@ int main(int const argc, char const * const * const argv) {
 
         }
     }
-    else if (args[1] == "decay") {
-        auto [e, i] = dm.parse_nuclide(args[2]);
+    else if (a_args[0] == "decay") {
+        auto [e, i] = dm.parse_nuclide(a_args[1]);
 
         auto const & periodic_data = dm.get_periodic_entry(e);
-        auto const decay_data = dm.fetch_decay_data(e, i);
+        const auto [gamma_discrete, xray_discrete, electron_discrete] = dm.fetch_decay_data(e, i);
 
         std::cout << "========== " <<  periodic_data.name << '-' << i << " DECAY DATA ==========" << '\n';
 
-        for (const auto &[energy, energy_delta, intensity, intensity_delta] : decay_data.gamma_discrete) {
+        std::cout << "GAMMA: \n";
+        for (const auto &[energy, energy_delta, intensity, intensity_delta] : gamma_discrete) {
+            std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+        }
+
+        std::cout << "X-RAY: \n";
+        for (const auto &[energy, energy_delta, intensity, intensity_delta] : xray_discrete) {
+            std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+        }
+
+        std::cout << "ELECTRON: \n";
+        for (const auto &[energy, energy_delta, intensity, intensity_delta] : electron_discrete) {
             std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
         }
 
         std::cout << std::flush;
     }
-    else if (args[1] == "eval") {
-        PyImport_AppendInittab("nds", PyInit_nds);
+    else if (a_args[0] == "eval") {
+        std::string command;
 
-        Py_Initialize();
+        std::ranges::for_each(a_args, [&command](auto const & a_arg) { (command += a_arg) += ' '; });
 
-        PyObject * main_module = PyImport_AddModule("__main__");
-        PyObject * globals = PyModule_GetDict(main_module);
-        PyObject * locals = PyDict_New();
-
-        PyObject * func_nuclide_data = PyCFunction_New(Py_nds_methods, nullptr);
-        PyDict_SetItemString(globals, "N", func_nuclide_data);
-
-        PyObject * result = PyRun_String("N('Co')['name']", Py_eval_input, globals, locals);
-
-        PyObject * str = PyObject_Str(result);
-
-        char const * buffer = PyUnicode_AsUTF8(str);
-
-        std::cout << buffer << std::endl;
-
-        Py_DECREF(str);
-        if (result) Py_DECREF(result);
-        Py_Finalize();
+        run_python_command(command.substr(5));
     }
+}
+
+std::vector<std::string> parse_arguments(std::string_view const a_command) {
+    std::vector<std::string> args;
+
+    bool escape_mode = false;
+    bool quote_mode = false;
+    auto arg_start_it = a_command.cbegin();
+
+    std::vector<std::size_t> exclusions;
+
+    for (auto it = arg_start_it; it != a_command.cend(); ++it) {
+        if (escape_mode) {
+            escape_mode = false;
+            continue;
+        };
+
+        if (*it == '\\') {
+            escape_mode = true;
+            exclusions.push_back(it - arg_start_it);
+            continue;
+        }
+
+        if (*it == '"') {
+            if (quote_mode) {
+                if (it + 1 != a_command.cend() && *(it + 1) == ' ') {
+                    quote_mode = false;
+
+                    auto arg = std::string(arg_start_it, it);
+                    std::ranges::for_each(exclusions, [i = 0, &arg](auto const exclusion) mutable {
+                        arg.erase(exclusion - i++, 1);
+                    });
+                    exclusions.clear();
+
+                    args.emplace_back(std::move(arg));
+                    arg_start_it = ++it + 1;
+                }
+            } else if (it == arg_start_it) {
+                arg_start_it = it + 1;
+                quote_mode = true;
+            }
+
+            continue;
+        }
+
+        if (quote_mode) continue;
+
+        if (*it == ' ') {
+            auto arg = std::string(arg_start_it, it);
+            std::ranges::for_each(exclusions, [i = 0, &arg](auto const exclusion) mutable {
+                arg.erase(exclusion - i++, 1);
+            });
+            exclusions.clear();
+
+            args.emplace_back(std::move(arg));
+            arg_start_it = it + 1;
+        }
+    }
+
+    if (arg_start_it != a_command.cend()) {
+        auto arg = std::string(arg_start_it, a_command.cend());
+        std::ranges::for_each(exclusions, [i = 0, &arg](auto const exclusion) mutable {
+            arg.erase(exclusion - i++, 1);
+        });
+        exclusions.clear();
+
+        args.emplace_back(std::move(arg));
+    }
+
+    return std::move(args);
+}
+
+
+// ==================================== PYTHON ENVIRONMENT ====================================
+
+void initialize_python_environment() {
+    Py_Initialize();
+
+    main_module = PyImport_AddModule("__main__");
+    globals = PyModule_GetDict(main_module);
+    locals = PyDict_New();
+
+    for (auto ptr = Py_nds_methods; ptr->ml_meth != nullptr; ++ptr) {
+        PyObject * func = PyCFunction_New(ptr, nullptr);
+        PyDict_SetItemString(globals, ptr->ml_name, func);
+        Py_DECREF(func);
+    }
+}
+
+void deinitialize_python_environment() {
+    Py_Finalize();
+}
+
+void run_python_command(std::string const & a_command) {
+    PyObject * result = PyRun_String(a_command.data(), Py_eval_input, globals, locals);
+
+    if (result == Py_None) {
+        return;
+    }
+
+    PyObject * str = PyObject_Str(result);
+
+    char const * buffer = PyUnicode_AsUTF8(str);
+
+    std::cout << buffer << std::endl;
+
+    Py_DECREF(str);
+    if (result) Py_DECREF(result);
+}
+
+// ==================================== PYTHON METHODS ====================================
+
+PyObject * Py_nds_nuclide_data(PyObject *, PyObject * args) {
+    const char * nuclide_string;
+
+    if (!PyArg_ParseTuple(args, "s", &nuclide_string)) {
+        return nullptr;
+    }
+
+    auto const [e, i] = dm.parse_nuclide(nuclide_string);
+
+    auto const & periodic_entry = dm.get_periodic_entry(e);
+
+    PyObject * data = PyDict_New();
+
+    PyDict_SetItemString(data, "name", PyUnicode_FromStringAndSize(periodic_entry.name.data(), static_cast<Py_ssize_t>(periodic_entry.name.size())));
+
+    return data;
 }
