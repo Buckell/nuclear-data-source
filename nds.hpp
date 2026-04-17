@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <format>
 #include <fstream>
 #include <map>
 #include <optional>
@@ -15,6 +16,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <ZipFile.h>
 
 constexpr std::string_view periodic_dir = "data/periodic.csv";
 constexpr std::size_t periodic_header_offset = 338;
@@ -26,7 +29,7 @@ constexpr std::string_view awr_dir = "data/awr_data";
 constexpr std::size_t awr_header_offset = 268;
 
 namespace nds {
-    using std::literals::string_view_literals::operator ""sv;
+    using namespace std::literals;
 
     constexpr std::double_t neutron_mass_kg = 1.67492750056E-27;
     constexpr std::double_t neutron_mass_mevc2 = 939.56542194;
@@ -53,6 +56,41 @@ namespace nds {
         { "zs"sv, 1E-21 },
         { "ys"sv, 1E-24 },
     };
+
+    inline std::map<std::int64_t, std::string_view> metric_prefixes = {
+        { 6,  "Y"sv },
+        { 5,  "E"sv },
+        { 4,  "P"sv },
+        { 3,   "G"sv },
+        { 2,   "M"sv },
+        { 1,   "k"sv },
+        { -1,  "m"sv },
+        { -2,  "u"sv },
+        { -3,  "n"sv },
+        { -4, "p"sv },
+        { -5, "f"sv },
+        { -6, "a"sv },
+        { -7, "z"sv },
+        { -8, "y"sv },
+    };
+
+    constexpr std::string format_metric(std::double_t a_number, std::string_view const a_base_unit) {
+        std::int64_t factor = 0;
+
+        while (true) {
+            if (a_number > 1000) {
+                a_number /= 1000;
+                factor += 1;
+            } else if (a_number < 0) {
+                a_number *= 1000;
+                factor -= 1;
+            } else {
+                break;
+            }
+        }
+
+        return std::to_string(a_number) + " " + std::string(metric_prefixes[factor]) + std::string(a_base_unit);
+    }
 
     constexpr std::string_view trim(std::string_view a_string) {
         // ReSharper disable once CppDFALocalValueEscapesFunction
@@ -129,6 +167,19 @@ namespace nds {
         std::double_t const decay_constant; // s-1
     };
 
+    struct discrete_energy {
+        std::double_t const energy;
+        std::double_t const energy_delta;
+        std::double_t const intensity;
+        std::double_t const intensity_delta;
+    };
+
+    struct decay_data {
+        std::vector<discrete_energy> const gamma_discrete;
+        std::vector<discrete_energy> const xray_discrete;
+        std::vector<discrete_energy> const electron_discrete;
+    };
+
     class data_manager {
         std::string periodic_text;
         std::string nubase_text;
@@ -174,7 +225,8 @@ namespace nds {
             return nubase_data[a_atomic_number - 1].at(a_isotope);
         }
 
-        std::pair<std::uint8_t, std::uint16_t> parse_nuclide(std::string_view const a_nuclide) {
+        [[nodiscard]]
+        std::pair<std::uint8_t, std::uint16_t> parse_nuclide(std::string_view const a_nuclide) const {
             auto isotope_start = 0;
             while (isotope_start < a_nuclide.length() && !(a_nuclide[isotope_start] >= '0' && a_nuclide[isotope_start] <= '9')) ++isotope_start;
 
@@ -211,6 +263,107 @@ namespace nds {
             std::from_chars(isotope_string.data(), isotope_string.data() + isotope_string.size(), isotope);
 
             return { element, isotope };
+        }
+
+        [[nodiscard]]
+        decay_data fetch_decay_data(std::uint8_t const a_atomic_number, std::uint16_t const a_isotope) const {
+            auto const convert_endf_numeral = [](std::string_view const a_numeral_string) -> std::double_t {
+                if (auto const plus_position = a_numeral_string.rfind('+'); plus_position != std::string_view::npos) {
+                    return to_floating<std::double_t>(a_numeral_string.substr(0, plus_position)).value()
+                           * pow(10, to_integer<std::uint8_t>(a_numeral_string.substr(plus_position + 1)).value());
+                }
+
+                if (auto const negative_position = a_numeral_string.rfind('-'); negative_position != std::string_view::npos) {
+                    return to_floating<std::double_t>(a_numeral_string.substr(0, negative_position)).value()
+                           * pow(10, -to_integer<std::uint8_t>(a_numeral_string.substr(negative_position + 1)).value());
+                }
+
+                return 0;
+            };
+
+            auto const & periodic_entry = get_periodic_entry(a_atomic_number);
+
+            auto atomic_number_string = std::to_string(a_atomic_number);
+            atomic_number_string = std::string(3 - atomic_number_string.length(), '0') + atomic_number_string;
+            auto isotope_string = std::to_string(a_isotope);
+            isotope_string = std::string(3 - isotope_string.length(), '0') + isotope_string;
+
+            auto const endf = ZipFile::Open("./data/ENDF-B-VIII.0_decay.zip");
+            auto const decay_archive = endf->GetEntry(std::format("ENDF-B-VIII.0_decay/dec-{}_{}_{}.endf", atomic_number_string, periodic_entry.symbol, isotope_string));
+            auto const decompress_stream = decay_archive->GetDecompressionStream();
+
+            std::vector<discrete_energy> gammas;
+            std::vector<discrete_energy> xrays;
+            std::vector<discrete_energy> electrons;
+
+            for (std::string line; !(line.length() > 68 && line[68] == '-'); std::getline(*decompress_stream, line)) {
+                if (std::string_view line_view = line; line_view.length() > 71 && line_view.substr(71, 4) == "8457") {
+                    if (
+                        auto const terminal_value_string = trim(line_view.substr(56, 10));
+                        terminal_value_string != "0" && terminal_value_string.rfind('-') == std::string_view::npos && terminal_value_string.rfind('+') == std::string_view::npos
+                    ) {
+                        // 0: gamma
+                        // 1: B- endpoints
+                        // 8: electron
+                        // 9: X-ray
+                        auto const key = convert_endf_numeral(line.substr(12, 10));
+
+                        if (convert_endf_numeral(line.substr(1, 10)) != 0) {
+                            continue;
+                        }
+
+                        auto section_entry_count = to_integer<std::size_t>(trim(line_view.substr(56, 10))).value();
+
+                        for (auto rows_left = to_integer<std::size_t>(trim(line_view.substr(45, 10))).value() / 6; rows_left > 0; --rows_left) {
+                            std::getline(*decompress_stream, line);
+                        }
+
+                        while (section_entry_count--) {
+                            std::getline(*decompress_stream, line);
+                            line_view = line;
+
+                            auto rows_left = to_integer<std::size_t>(trim(line_view.substr(45, 10))).value() / 6;
+
+                            auto const energy = convert_endf_numeral(line_view.substr(1, 10));
+                            auto const energy_delta = convert_endf_numeral(line_view.substr(12, 10));
+
+                            std::getline(*decompress_stream, line);
+                            line_view = line;
+
+                            --rows_left;
+
+                            auto const intensity = convert_endf_numeral(line_view.substr(23, 10));
+                            auto const intensity_delta = convert_endf_numeral(line_view.substr(34, 10));
+
+                            switch (static_cast<std::size_t>(key)) {
+                                case 0:
+                                    gammas.emplace_back(energy, energy_delta, intensity, intensity_delta);
+                                    break;
+                                case 8:
+                                    electrons.emplace_back(energy, energy_delta, intensity, intensity_delta);
+                                    break;
+                                case 9:
+                                    xrays.emplace_back(energy, energy_delta, intensity, intensity_delta);
+                                    break;
+                                default:
+                                    break;
+                            }
+
+                            for (; rows_left > 0; --rows_left) {
+                                std::getline(*decompress_stream, line);
+                            }
+                        }
+                    }
+                }
+            }
+
+            decay_archive->CloseDecompressionStream();
+
+            return {
+                .gamma_discrete = gammas,
+                .xray_discrete = xrays,
+                .electron_discrete = electrons,
+            };
         }
 
     private:

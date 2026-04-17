@@ -3,9 +3,6 @@
 
 #include <Python.h>
 
-#include <ZipFile.h>
-#include <ZipArchive.h>
-
 #include "nds.hpp"
 
 constexpr std::string_view help_message = R"(
@@ -20,7 +17,7 @@ constexpr std::string_view help_message = R"(
  ░██    ░███   ░███████      ░██████
 
          Nuclear Data Source
-               v0.0.1
+               v0.0.2
 =======================================
 
   nds - Displays this message.
@@ -146,7 +143,20 @@ int main(int const argc, char const * const * const argv) {
             std::cout << std::flush;
 
         }
+    }
+    else if (args[1] == "decay") {
+        auto [e, i] = dm.parse_nuclide(args[2]);
 
+        auto const & periodic_data = dm.get_periodic_entry(e);
+        auto const decay_data = dm.fetch_decay_data(e, i);
+
+        std::cout << "========== " <<  periodic_data.name << '-' << i << " DECAY DATA ==========" << '\n';
+
+        for (const auto &[energy, energy_delta, intensity, intensity_delta] : decay_data.gamma_discrete) {
+            std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+        }
+
+        std::cout << std::flush;
     }
     else if (args[1] == "eval") {
         PyImport_AppendInittab("nds", PyInit_nds);
