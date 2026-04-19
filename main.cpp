@@ -29,7 +29,7 @@ constexpr std::wstring_view intro_message = LR"(
   NNNNNNNN         NNNNNNNDDDDDDDDDDDDD         SSSSSSSSSSSSSSS
 
                       Nuclear Data Source
-                            v0.1.0
+                            v0.1.1
 ====================================================================
 
     Type 'help' to view available commands.
@@ -67,9 +67,11 @@ void deinitialize_python_environment();
 void run_python_command(std::string const & a_command);
 
 PyObject * Py_nds_nuclide_data(PyObject * self, PyObject * args);
+PyObject * Py_nds_nuclide_decay_data(PyObject * self, PyObject * args);
 
 PyMethodDef Py_nds_methods[] = {
     {"N", Py_nds_nuclide_data, METH_VARARGS, "Get nuclide data." },
+    {"DecayData", Py_nds_nuclide_decay_data, METH_VARARGS, "Get nuclide decay data." },
     {nullptr, nullptr, 0, nullptr}
 };
 
@@ -130,15 +132,15 @@ int main(int const argc, char const * const * const argv) {
 
 void execute_command(std::span<std::string_view const> const a_args) {
     if (a_args[0] == "n") {
-        auto [e, i] = dm.parse_nuclide(a_args[1]);
+        auto const nuclide = dm.parse_nuclide(a_args[1]);
 
-        auto const & periodic_data = dm.get_periodic_entry(e);
+        auto const & periodic_data = dm.get_periodic_entry(nuclide.atomic_number);
 
-        if (i > 0) {
-            auto const & nubase_data = dm.get_nubase_entry(e, i);
-            auto const awr = dm.get_atomic_weight_ratio(e, i);
+        if (nuclide.isotope > 0) {
+            auto const & nubase_data = dm.get_nubase_entry(nuclide);
+            auto const awr = dm.get_atomic_weight_ratio(nuclide);
 
-            std::cout << "========== " <<  periodic_data.name << '-' << i << " ==========" << '\n';
+            std::cout << "========== " <<  periodic_data.name << '-' << nuclide.isotope << " ==========" << '\n';
             std::cout << "Atomic Mass: " << awr * nds::neutron_mass_da << " u (" << awr << "n)\n";
             std::cout << "             " << awr * nds::neutron_mass_mevc2 << " MeV/c^2\n";
             std::cout << "             " << awr * nds::neutron_mass_kg << " kg\n";
@@ -165,13 +167,13 @@ void execute_command(std::span<std::string_view const> const a_args) {
             std::cout << "Melting Point: " << periodic_data.melting_point << " K \n";
 
             std::cout << "Isotopes: ";
-            auto const & nubase_data = dm.get_nubase_entries(e);
-            std::ranges::for_each(nubase_data, [](std::pair<std::uint16_t, nds::nubase_entry> const & kvp) {
+            auto const & nubase_data = dm.get_nubase_entries(nuclide.atomic_number);
+            std::ranges::for_each(nubase_data, [](std::pair<std::uint16_t, std::vector<nds::nubase_entry>> const & kvp) {
                 auto const & [isotope, data] = kvp;
                 std::cout << isotope;
 
-                if (!data.isotope_abundance.empty()) {
-                    std::cout << " (" << data.isotope_abundance << "%)";
+                if (!data[0].isotope_abundance.empty()) {
+                    std::cout << " (" << data[0].isotope_abundance << "%)";
                 }
 
                 std::cout << ", ";
@@ -185,12 +187,12 @@ void execute_command(std::span<std::string_view const> const a_args) {
         }
     }
     else if (a_args[0] == "decay") {
-        auto [e, i] = dm.parse_nuclide(a_args[1]);
+        auto const nuclide = dm.parse_nuclide(a_args[1]);
 
-        auto const & periodic_data = dm.get_periodic_entry(e);
-        const auto [gamma_discrete, xray_discrete, electron_discrete] = dm.fetch_decay_data(e, i);
+        auto const & periodic_data = dm.get_periodic_entry(nuclide.atomic_number);
+        const auto [gamma_discrete, xray_discrete, electron_discrete] = dm.fetch_decay_data(nuclide);
 
-        std::cout << "========== " <<  periodic_data.name << '-' << i << " DECAY DATA ==========" << '\n';
+        std::cout << "========== " <<  periodic_data.name << '-' << nuclide.isotope << " DECAY DATA ==========" << '\n';
 
         std::cout << "GAMMA: \n";
         for (const auto &[energy, energy_delta, intensity, intensity_delta] : gamma_discrete) {
@@ -310,20 +312,31 @@ void deinitialize_python_environment() {
 }
 
 void run_python_command(std::string const & a_command) {
-    PyObject * result = PyRun_String(a_command.data(), Py_eval_input, globals, locals);
+    if (PyObject const * const result = PyRun_String(a_command.data(), Py_single_input, globals, locals); result == nullptr) {
+        if (PyErr_Occurred()) {
+            PyErr_Print();
 
-    if (result == Py_None) {
+            PyObject * type, * value, * traceback;
+            PyErr_Fetch(&type, &value, &traceback);
+
+            PyErr_NormalizeException(&type, &value, &traceback);
+
+            Py_XDECREF(type);
+            Py_XDECREF(value);
+            Py_XDECREF(traceback);
+        }
+
         return;
     }
 
-    PyObject * str = PyObject_Str(result);
-
-    char const * buffer = PyUnicode_AsUTF8(str);
-
-    std::cout << buffer << std::endl;
-
-    Py_DECREF(str);
-    if (result) Py_DECREF(result);
+    // PyObject * str = PyObject_Str(result);
+    //
+    // char const * buffer = PyUnicode_AsUTF8(str);
+    //
+    // std::cout << buffer << std::endl;
+    //
+    // Py_DECREF(str);
+    // Py_XDECREF(result);
 }
 
 // ==================================== PYTHON METHODS ====================================
@@ -335,13 +348,80 @@ PyObject * Py_nds_nuclide_data(PyObject *, PyObject * args) {
         return nullptr;
     }
 
-    auto const [e, i] = dm.parse_nuclide(nuclide_string);
+    auto const nuclide = dm.parse_nuclide(nuclide_string);
 
-    auto const & periodic_entry = dm.get_periodic_entry(e);
+    auto const & periodic_entry = dm.get_periodic_entry(nuclide.atomic_number);
 
     PyObject * data = PyDict_New();
 
     PyDict_SetItemString(data, "name", PyUnicode_FromStringAndSize(periodic_entry.name.data(), static_cast<Py_ssize_t>(periodic_entry.name.size())));
 
     return data;
+}
+
+PyObject * Py_nds_nuclide_decay_data(PyObject * self, PyObject * args) {
+    const char * nuclide_string;
+
+    if (!PyArg_ParseTuple(args, "s", &nuclide_string)) {
+        return nullptr;
+    }
+
+    auto const nuclide = dm.parse_nuclide(nuclide_string);
+
+    const auto [gamma_discrete, xray_discrete, electron_discrete] = dm.fetch_decay_data(nuclide);
+
+    PyObject * py_data = PyDict_New();
+
+    PyObject * py_gammas = PyList_New(static_cast<Py_ssize_t>(gamma_discrete.size()));
+    Py_ssize_t py_gamma_ctr = 0;
+
+    for (const auto [energy, energy_delta, intensity, intensity_delta] : gamma_discrete) {
+        PyObject * py_row = PyList_New(4);
+
+        PyList_SetItem(py_row, 0, PyFloat_FromDouble(energy));
+        PyList_SetItem(py_row, 1, PyFloat_FromDouble(energy_delta));
+        PyList_SetItem(py_row, 2, PyFloat_FromDouble(intensity));
+        PyList_SetItem(py_row, 3, PyFloat_FromDouble(intensity_delta));
+
+        PyList_SetItem(py_gammas, py_gamma_ctr++, py_row);
+    }
+
+    PyObject * py_xrays = PyList_New(static_cast<Py_ssize_t>(xray_discrete.size()));
+    Py_ssize_t py_xray_ctr = 0;
+
+    for (const auto [energy, energy_delta, intensity, intensity_delta] : xray_discrete) {
+        PyObject * py_row = PyList_New(4);
+
+        PyList_SetItem(py_row, 0, PyFloat_FromDouble(energy));
+        PyList_SetItem(py_row, 1, PyFloat_FromDouble(energy_delta));
+        PyList_SetItem(py_row, 2, PyFloat_FromDouble(intensity));
+        PyList_SetItem(py_row, 3, PyFloat_FromDouble(intensity_delta));
+
+        PyList_SetItem(py_xrays, py_xray_ctr++, py_row);
+    }
+
+    PyObject * py_electrons = PyList_New(static_cast<Py_ssize_t>(electron_discrete.size()));
+    Py_ssize_t py_electron_ctr = 0;
+
+    for (const auto [energy, energy_delta, intensity, intensity_delta] : electron_discrete) {
+        PyObject * py_row = PyList_New(4);
+
+        PyList_SetItem(py_row, 0, PyFloat_FromDouble(energy));
+        PyList_SetItem(py_row, 1, PyFloat_FromDouble(energy_delta));
+        PyList_SetItem(py_row, 2, PyFloat_FromDouble(intensity));
+        PyList_SetItem(py_row, 3, PyFloat_FromDouble(intensity_delta));
+
+        PyList_SetItem(py_electrons, py_electron_ctr++, py_row);
+    }
+
+    PyDict_SetItemString(py_data, "gamma_discrete", py_gammas);
+    Py_DECREF(py_gammas);
+
+    PyDict_SetItemString(py_data, "xray_discrete", py_xrays);
+    Py_DECREF(py_xrays);
+
+    PyDict_SetItemString(py_data, "electron_discrete", py_electrons);
+    Py_DECREF(py_electrons);
+
+    return py_data;
 }

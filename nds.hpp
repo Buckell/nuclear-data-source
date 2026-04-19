@@ -118,6 +118,12 @@ namespace nds {
         return std::nullopt;
     }
 
+    struct nuclide {
+        std::uint8_t const atomic_number;
+        std::uint16_t const isotope = 0;
+        std::uint8_t const state = 0; // Metastable states, 1 = m, 2 = n
+    };
+
     struct periodic_entry {
         union {
             struct {
@@ -160,11 +166,11 @@ namespace nds {
     };
 
     struct nubase_entry {
-        std::string_view const mass_excess; // keV
-        std::string_view const half_life;
-        std::string_view const half_life_units;
-        std::string_view const isotope_abundance;
-        std::double_t const decay_constant; // s-1
+        std::string_view mass_excess; // keV
+        std::string_view half_life;
+        std::string_view half_life_units;
+        std::string_view isotope_abundance;
+        std::double_t decay_constant; // s-1
     };
 
     struct discrete_energy {
@@ -186,7 +192,7 @@ namespace nds {
         std::string awr_text; // atomic weight ratios
 
         std::vector<periodic_entry> periodic_data;
-        std::vector<std::map<std::uint16_t, nubase_entry>> nubase_data;
+        std::vector<std::map<std::uint16_t, std::vector<nubase_entry>>> nubase_data;
         std::vector<std::map<std::uint16_t, std::double_t>> awr_data;
 
     public:
@@ -206,8 +212,8 @@ namespace nds {
         }
 
         [[nodiscard]]
-        std::double_t get_atomic_weight_ratio(std::uint8_t const a_atomic_number, std::uint16_t const a_isotope = 0) const {
-            return awr_data[a_atomic_number - 1].at(a_isotope);
+        std::double_t get_atomic_weight_ratio(nuclide const a_nuclide) const {
+            return awr_data[a_nuclide.atomic_number - 1].at(a_nuclide.isotope);
         }
 
         [[nodiscard]]
@@ -216,17 +222,29 @@ namespace nds {
         }
 
         [[nodiscard]]
-        std::map<std::uint16_t, nubase_entry> const & get_nubase_entries(std::uint8_t const a_atomic_number) const {
+        std::map<std::uint16_t, std::vector<nubase_entry>> const & get_nubase_entries(std::uint8_t const a_atomic_number) const {
             return nubase_data[a_atomic_number - 1];
         }
 
         [[nodiscard]]
-        nubase_entry const & get_nubase_entry(std::uint8_t const a_atomic_number, std::uint16_t const a_isotope) const {
-            return nubase_data[a_atomic_number - 1].at(a_isotope);
+        nubase_entry const & get_nubase_entry(nuclide const a_nuclide) const {
+            auto const [atomic_number, isotope, state] = a_nuclide;
+            return nubase_data[atomic_number - 1].at(isotope).at(state);
         }
 
         [[nodiscard]]
-        std::pair<std::uint8_t, std::uint16_t> parse_nuclide(std::string_view const a_nuclide) const {
+        nuclide parse_nuclide(std::string_view a_nuclide) const {
+            auto state = 0ui8;
+
+            if (a_nuclide.ends_with('m')) {
+                state = 1;
+                a_nuclide = a_nuclide.substr(0, a_nuclide.length() - 1);
+            }
+            else if (a_nuclide.ends_with('n')) {
+                state = 2;
+                a_nuclide = a_nuclide.substr(0, a_nuclide.length() - 1);
+            }
+
             auto isotope_start = 0;
             while (isotope_start < a_nuclide.length() && !(a_nuclide[isotope_start] >= '0' && a_nuclide[isotope_start] <= '9')) ++isotope_start;
 
@@ -262,11 +280,13 @@ namespace nds {
             std::from_chars(element_string.data(), element_string.data() + element_string.size(), element);
             std::from_chars(isotope_string.data(), isotope_string.data() + isotope_string.size(), isotope);
 
-            return { element, isotope };
+            return { element, isotope, state };
         }
 
         [[nodiscard]]
-        decay_data fetch_decay_data(std::uint8_t const a_atomic_number, std::uint16_t const a_isotope) const {
+        decay_data fetch_decay_data(nuclide const a_nuclide) const {
+            auto const [atomic_number, isotope, state] = a_nuclide;
+
             auto const convert_endf_numeral = [](std::string_view const a_numeral_string) -> std::double_t {
                 if (auto const plus_position = a_numeral_string.rfind('+'); plus_position != std::string_view::npos) {
                     return to_floating<std::double_t>(a_numeral_string.substr(0, plus_position)).value()
@@ -281,15 +301,16 @@ namespace nds {
                 return 0;
             };
 
-            auto const & periodic_entry = get_periodic_entry(a_atomic_number);
+            auto const & periodic_entry = get_periodic_entry(atomic_number);
 
-            auto atomic_number_string = std::to_string(a_atomic_number);
+            auto atomic_number_string = std::to_string(atomic_number);
             atomic_number_string = std::string(3 - atomic_number_string.length(), '0') + atomic_number_string;
-            auto isotope_string = std::to_string(a_isotope);
+            auto isotope_string = std::to_string(isotope);
             isotope_string = std::string(3 - isotope_string.length(), '0') + isotope_string;
+            auto state_string = state > 0 ? std::format("m{}", state) : "";
 
             auto const endf = ZipFile::Open("./data/ENDF-B-VIII.0_decay.zip");
-            auto const decay_archive = endf->GetEntry(std::format("ENDF-B-VIII.0_decay/dec-{}_{}_{}.endf", atomic_number_string, periodic_entry.symbol, isotope_string));
+            auto const decay_archive = endf->GetEntry(std::format("ENDF-B-VIII.0_decay/dec-{}_{}_{}{}.endf", atomic_number_string, periodic_entry.symbol, isotope_string, state_string));
             auto const decompress_stream = decay_archive->GetDecompressionStream();
 
             std::vector<discrete_energy> gammas;
@@ -470,11 +491,9 @@ namespace nds {
                     }
                 }
 
-                std::uint8_t element;
-                std::from_chars(atomic_number.data(), atomic_number.data() + atomic_number.size(), element);
-
-                std::uint16_t isotope;
-                std::from_chars(mass_number.data(), mass_number.data() + mass_number.size(), isotope);
+                auto const element = to_integer<std::uint8_t>(atomic_number).value();
+                auto const isotope = to_integer<std::uint16_t>(mass_number).value();
+                auto const state = to_integer<std::uint16_t>(alt_type).value_or(0);
 
                 if (element == 0) {
                     return;
@@ -482,13 +501,21 @@ namespace nds {
 
                 auto const half_life_value = to_floating<std::double_t>(half_life);
 
-                nubase_data[element - 1].emplace(isotope, nubase_entry{
-                    .mass_excess = mass_excess,
-                    .half_life = half_life,
-                    .half_life_units = half_life_units,
-                    .isotope_abundance = isotope_abundance,
-                    .decay_constant = half_life_value.has_value() ? log(2) / (half_life_value.value() * nubase_decay_time_unit_factors[half_life_units]) : 0
-                });
+                auto & element_nubase_entries = nubase_data[element - 1];
+                auto [pair_it, did_emplace] = element_nubase_entries.try_emplace(isotope, std::vector<nubase_entry>());
+                auto & [entry_isotope, entry_vector] = *pair_it;
+
+                if (entry_vector.size() <= state) {
+                    entry_vector.resize(state);
+                }
+
+                entry_vector.emplace(entry_vector.cbegin() + state,
+                    mass_excess,
+                    half_life,
+                    half_life_units,
+                    isotope_abundance,
+                    half_life_value.has_value() ? log(2) / (half_life_value.value() * nubase_decay_time_unit_factors[half_life_units]) : 0.0
+                );
             };
 
             auto line_begin = nubase_text.cbegin();
