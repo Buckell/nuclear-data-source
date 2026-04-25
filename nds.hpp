@@ -460,7 +460,7 @@ namespace nds {
             auto const process_line = [this](std::string_view const a_line) {
                 auto const mass_number   = a_line.substr(0, 3);
                 auto const atomic_number = a_line.substr(4, 3);
-                auto const alt_type      = a_line.substr(8, 1);
+                auto const alt_type      = a_line.substr(7, 1);
                 auto const isotope_name  = a_line.substr(11, 5);
                 auto const alt           = a_line.substr(16, 1);
                 auto const mass_excess   = trim(a_line.substr(18, 13)); // keV
