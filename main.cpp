@@ -1,6 +1,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <csignal>
 
 #include <Python.h>
 #include <ranges>
@@ -29,7 +30,7 @@ constexpr std::wstring_view intro_message = LR"(
   NNNNNNNN         NNNNNNNDDDDDDDDDDDDD         SSSSSSSSSSSSSSS
 
                       Nuclear Data Source
-                            v0.1.1
+                            v0.1.2
 ====================================================================
 
     Type 'help' to view available commands.
@@ -46,6 +47,8 @@ constexpr std::string_view help_message = R"(
 
   eval <expression> - Evaluate a Python expression within the NDS context.
 
+  exec <file> - Evaluate a Python file within the NDS context.
+
   exit - Leave the program.
 )";
 
@@ -59,12 +62,15 @@ PyObject * main_module;
 PyObject * globals;
 PyObject * locals;
 
+void interrupt_signal_handler(int);
+
 void execute_command(std::span<std::string_view const> a_args);
 std::vector<std::string> parse_arguments(std::string_view a_command);
 
 void initialize_python_environment();
 void deinitialize_python_environment();
 void run_python_command(std::string const & a_command);
+void run_python_file(std::string const & a_file);
 
 PyObject * Py_nds_nuclide_data(PyObject * self, PyObject * args);
 PyObject * Py_nds_nuclide_decay_data(PyObject * self, PyObject * args);
@@ -84,6 +90,8 @@ int main(int const argc, char const * const * const argv) {
     // Increase floating point output precision.
     std::cout << std::setprecision(10);
 
+    std::signal(SIGINT, interrupt_signal_handler);
+
     if (argc > 1) {
         execute_command(std::span(initial_args).subspan(1));
         return EXIT_SUCCESS;
@@ -99,6 +107,8 @@ int main(int const argc, char const * const * const argv) {
 
         std::cout << ">>> " << std::flush;
         std::getline(std::cin, command);
+
+        if (std::cin.eof()) break;
 
         if (command == "py") {
             python_mode = !python_mode;
@@ -121,16 +131,28 @@ int main(int const argc, char const * const * const argv) {
         execute_command(args_view);
     } while (command != "exit");
 
-    std::cout << "Thank you for using NDS!" << std::endl;
+    std::cout << "\nThank you for using NDS!" << std::endl;
 
     deinitialize_python_environment();
 
     return EXIT_SUCCESS;
 }
 
+// ==================================== SIGNAL HANDLING ====================================
+
+void interrupt_signal_handler(int) {
+    deinitialize_python_environment();
+
+    std::exit(EXIT_SUCCESS);
+}
+
 // ==================================== COMMAND HANDLING ====================================
 
 void execute_command(std::span<std::string_view const> const a_args) {
+    if (a_args.empty()) {
+        return;
+    }
+
     if (a_args[0] == "n") {
         auto const nuclide = dm.parse_nuclide(a_args[1]);
 
@@ -217,6 +239,11 @@ void execute_command(std::span<std::string_view const> const a_args) {
         std::ranges::for_each(a_args, [&command](auto const & a_arg) { (command += a_arg) += ' '; });
 
         run_python_command(command.substr(5));
+    }
+    else if (a_args[0] == "exec") {
+        std::string const file(a_args[1]);
+
+        run_python_file(file);
     }
 }
 
@@ -338,6 +365,31 @@ void run_python_command(std::string const & a_command) {
     // Py_DECREF(str);
     // Py_XDECREF(result);
 }
+
+void run_python_file(std::string const & a_file) {
+    FILE* file = nullptr;
+    fopen_s(&file, a_file.data(), "r");
+
+    if (PyObject const * const result = PyRun_File(file, a_file.data(), Py_file_input, globals, locals); result == nullptr) {
+        if (PyErr_Occurred()) {
+            PyErr_Print();
+
+            PyObject * type, * value, * traceback;
+            PyErr_Fetch(&type, &value, &traceback);
+
+            PyErr_NormalizeException(&type, &value, &traceback);
+
+            Py_XDECREF(type);
+            Py_XDECREF(value);
+            Py_XDECREF(traceback);
+        }
+    }
+
+    if (file) {
+        fclose(file);
+    }
+}
+
 
 // ==================================== PYTHON METHODS ====================================
 
