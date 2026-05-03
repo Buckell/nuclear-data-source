@@ -30,7 +30,7 @@ constexpr std::wstring_view intro_message = LR"(
   NNNNNNNN         NNNNNNNDDDDDDDDDDDDD         SSSSSSSSSSSSSSS
 
                       Nuclear Data Source
-                            v0.1.2
+                            v0.1.3
 ====================================================================
 
     Type 'help' to view available commands.
@@ -212,23 +212,44 @@ void execute_command(std::span<std::string_view const> const a_args) {
         auto const nuclide = dm.parse_nuclide(a_args[1]);
 
         auto const & periodic_data = dm.get_periodic_entry(nuclide.atomic_number);
-        const auto [gamma_discrete, xray_discrete, electron_discrete] = dm.fetch_decay_data(nuclide);
+        const auto [
+            beta_m_abundance,
+            beta_p_ec_abundance,
+            it_gamma_abundance,
+            alpha_abundance,
+            gamma_discrete,
+            xray_discrete,
+            electron_discrete
+        ] = dm.fetch_decay_data(nuclide);
 
         std::cout << "========== " <<  periodic_data.name << '-' << nuclide.isotope << " DECAY DATA ==========" << '\n';
 
-        std::cout << "GAMMA: \n";
-        for (const auto &[energy, energy_delta, intensity, intensity_delta] : gamma_discrete) {
-            std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+        std::cout << "MODES: \n";
+
+        if (beta_m_abundance > 0)    std::cout << "  B-:    " << beta_m_abundance    * 100 << "%\n";
+        if (beta_p_ec_abundance > 0) std::cout << "  B+/EC: " << beta_p_ec_abundance * 100 << "%\n";
+        if (it_gamma_abundance > 0)  std::cout << "  IT:    " << it_gamma_abundance  * 100 << "%\n";
+        if (alpha_abundance > 0)     std::cout << "  Alpha: " << alpha_abundance     * 100 << "%\n";
+
+        if (!gamma_discrete.empty()) {
+            std::cout << "GAMMA: \n";
+            for (const auto &[energy, energy_delta, intensity, intensity_delta] : gamma_discrete) {
+                std::cout << "  " << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+            }
         }
 
-        std::cout << "X-RAY: \n";
-        for (const auto &[energy, energy_delta, intensity, intensity_delta] : xray_discrete) {
-            std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+        if (!xray_discrete.empty()) {
+            std::cout << "X-RAY: \n";
+            for (const auto &[energy, energy_delta, intensity, intensity_delta] : xray_discrete) {
+                std::cout << "  " << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+            }
         }
 
-        std::cout << "ELECTRON: \n";
-        for (const auto &[energy, energy_delta, intensity, intensity_delta] : electron_discrete) {
-            std::cout << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+        if (!electron_discrete.empty()) {
+            std::cout << "ELECTRON: \n";
+            for (const auto &[energy, energy_delta, intensity, intensity_delta] : electron_discrete) {
+                std::cout << "  " << nds::format_metric(energy, "eV") << " (" << nds::format_metric(energy_delta, "eV") << ") @ " << intensity * 100  << "% (" << intensity_delta * 100 << "%)\n";
+            }
         }
 
         std::cout << std::flush;
@@ -420,9 +441,22 @@ PyObject * Py_nds_nuclide_decay_data(PyObject * self, PyObject * args) {
 
     auto const nuclide = dm.parse_nuclide(nuclide_string);
 
-    const auto [gamma_discrete, xray_discrete, electron_discrete] = dm.fetch_decay_data(nuclide);
+    const auto [
+        beta_m_abundance,
+        beta_p_ec_abundance,
+        it_gamma_abundance,
+        alpha_abundance,
+        gamma_discrete,
+        xray_discrete,
+        electron_discrete
+    ] = dm.fetch_decay_data(nuclide);
 
     PyObject * py_data = PyDict_New();
+
+    PyDict_SetItemString(py_data, "beta_m_abundance", PyFloat_FromDouble(beta_m_abundance));
+    PyDict_SetItemString(py_data, "beta_p_ec_abundance", PyFloat_FromDouble(beta_p_ec_abundance));
+    PyDict_SetItemString(py_data, "it_gamma_abundance", PyFloat_FromDouble(it_gamma_abundance));
+    PyDict_SetItemString(py_data, "alpha_abundance", PyFloat_FromDouble(alpha_abundance));
 
     PyObject * py_gammas = PyList_New(static_cast<Py_ssize_t>(gamma_discrete.size()));
     Py_ssize_t py_gamma_ctr = 0;

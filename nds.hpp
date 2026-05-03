@@ -170,7 +170,7 @@ namespace nds {
         std::string_view half_life;
         std::string_view half_life_units;
         std::string_view isotope_abundance;
-        std::double_t decay_constant; // s-1
+        std::double_t decay_constant{0}; // s-1
     };
 
     struct discrete_energy {
@@ -181,6 +181,11 @@ namespace nds {
     };
 
     struct decay_data {
+        std::double_t const beta_m_abundance;
+        std::double_t const beta_p_ec_abundance;
+        std::double_t const it_gamma_abundance;
+        std::double_t const alpha_abundance;
+
         std::vector<discrete_energy> const gamma_discrete;
         std::vector<discrete_energy> const xray_discrete;
         std::vector<discrete_energy> const electron_discrete;
@@ -313,9 +318,59 @@ namespace nds {
             auto const decay_archive = endf->GetEntry(std::format("ENDF-B-VIII.0_decay/dec-{}_{}_{}{}.endf", atomic_number_string, periodic_entry.symbol, isotope_string, state_string));
             auto const decompress_stream = decay_archive->GetDecompressionStream();
 
+            // Decay mode abundances.
+            std::double_t beta_m_abundance = 0;
+            std::double_t beta_p_ec_abundance = 0;
+            std::double_t it_gamma_abundance = 0;
+            std::double_t alpha_abundance = 0;
+
+            // Discrete decay energies.
             std::vector<discrete_energy> gammas;
             std::vector<discrete_energy> xrays;
             std::vector<discrete_energy> electrons;
+
+            for (std::string line; !(line.length() > 68 && line[68] == '-'); std::getline(*decompress_stream, line)) {
+                if (std::string_view line_view = line; line_view.length() > 71 && line_view.substr(71, 4) == "8457") {
+                    // Clear beginning entries until decay modes/abundances.
+                    std::getline(*decompress_stream, line);
+                    std::getline(*decompress_stream, line);
+                    std::getline(*decompress_stream, line);
+                    line_view = line;
+
+                    auto const decay_mode_count = to_integer<std::size_t>(trim(line_view.substr(56, 10))).value();
+
+                    for (auto i = decay_mode_count; i > 0; --i) {
+                        std::getline(*decompress_stream, line);
+                        line_view = line;
+
+                        // 1: B-
+                        // 2: EC/B+
+                        // 3: IT (gamma)
+                        // 4: alpha
+                        auto const decay_mode = convert_endf_numeral(line_view.substr(1, 10));
+                        auto const abundance = convert_endf_numeral(line_view.substr(45, 10));
+
+                        switch (static_cast<int>(decay_mode)) {
+                            case 1:
+                                beta_m_abundance = abundance;
+                                break;
+                            case 2:
+                                beta_p_ec_abundance = abundance;
+                                break;
+                            case 3:
+                                it_gamma_abundance = abundance;
+                                break;
+                            case 4:
+                                alpha_abundance = abundance;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+
+                    break;
+                }
+            }
 
             for (std::string line; !(line.length() > 68 && line[68] == '-'); std::getline(*decompress_stream, line)) {
                 if (std::string_view line_view = line; line_view.length() > 71 && line_view.substr(71, 4) == "8457") {
@@ -324,12 +379,13 @@ namespace nds {
                         terminal_value_string != "0" && terminal_value_string.rfind('-') == std::string_view::npos && terminal_value_string.rfind('+') == std::string_view::npos
                     ) {
                         // 0: gamma
-                        // 1: B- endpoints
+                        // 1: B- (endpoints)
+                        // 4: alpha
                         // 8: electron
                         // 9: X-ray
-                        auto const key = convert_endf_numeral(line.substr(12, 10));
+                        auto const key = convert_endf_numeral(line_view.substr(12, 10));
 
-                        if (convert_endf_numeral(line.substr(1, 10)) != 0) {
+                        if (convert_endf_numeral(line_view.substr(1, 10)) != 0) {
                             continue;
                         }
 
@@ -381,6 +437,10 @@ namespace nds {
             decay_archive->CloseDecompressionStream();
 
             return {
+                .beta_m_abundance = beta_m_abundance,
+                .beta_p_ec_abundance = beta_p_ec_abundance,
+                .it_gamma_abundance = it_gamma_abundance,
+                .alpha_abundance = alpha_abundance,
                 .gamma_discrete = gammas,
                 .xray_discrete = xrays,
                 .electron_discrete = electrons,
